@@ -10,6 +10,7 @@ import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -21,6 +22,7 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Observer
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
@@ -38,12 +40,14 @@ private const val REPEAT_INTERVAL_MS = 1_500L
  * those bounds are reported, so a small box scans just what it shows. Along an axis its parent leaves
  * unbounded, such as a scroll view's, it takes the window's size.
  * Camera access must already be granted; without it the preview stays black.
+ * [isTorchOn] lights the scene on devices with a flash unit.
  */
 @Composable
-fun QRScanner(modifier: Modifier, onScan: (String) -> Unit) {
+fun QRScanner(modifier: Modifier, isTorchOn: Boolean, onScan: (String) -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val currentOnScan by rememberUpdatedState(onScan)
+    val currentIsTorchOn by rememberUpdatedState(isTorchOn)
     val windowSize = LocalWindowInfo.current.containerSize
     val previewView = remember {
         PreviewView(context).apply {
@@ -53,14 +57,24 @@ fun QRScanner(modifier: Modifier, onScan: (String) -> Unit) {
         }
     }
 
+    val controller = remember {
+        LifecycleCameraController(context).apply { setEnabledUseCases(CameraController.IMAGE_ANALYSIS) }
+    }
+
+    LaunchedEffect(controller, isTorchOn) {
+        controller.enableTorch(isTorchOn)
+    }
+
     DisposableEffect(lifecycleOwner) {
         val mainExecutor = ContextCompat.getMainExecutor(context)
         val scanner = BarcodeScanning.getClient(
             BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
         )
-        val controller = LifecycleCameraController(context).apply {
-            setEnabledUseCases(CameraController.IMAGE_ANALYSIS)
+        // A torch request made before the camera is attached is dropped, so apply it again once frames stream
+        val streamObserver = Observer<PreviewView.StreamState> { state ->
+            if (state == PreviewView.StreamState.STREAMING) controller.enableTorch(currentIsTorchOn)
         }
+        previewView.previewStreamState.observe(lifecycleOwner, streamObserver)
         var lastValue: String? = null
         var lastSeen = 0L
 
@@ -85,6 +99,7 @@ fun QRScanner(modifier: Modifier, onScan: (String) -> Unit) {
         }
 
         onDispose {
+            previewView.previewStreamState.removeObserver(streamObserver)
             previewView.controller = null
             controller.unbind()
             scanner.close()
