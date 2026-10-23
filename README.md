@@ -3,7 +3,7 @@
 A [Skip](https://skip.dev) Swift/Kotlin library that generates and scans QR codes with one SwiftUI API on iOS and Android.
 
 - **Generate**: `QRCodeView` draws text as a QR code; `QRCode` exports it as a PNG or exposes its modules
-- **Scan**: `QRScannerView` is a live camera box that reports each QR code it sees
+- **Scan**: `QRScannerView` is a live camera box that reports each QR code it sees, with torch control
 - **Camera access**: `CameraAccess` checks, requests, and recovers camera permission
 
 ## Installation
@@ -87,7 +87,12 @@ for y in 0..<code.size {
 
 ### The Scanner
 
-`QRScannerView` is a live camera preview that reports each QR code as it comes into view. A code that stays in view is reported once.
+`QRScannerView` is a live camera preview. It reports the first QR code it sees, then dismisses the screen it is on: a sheet or full-screen cover closes, and a pushed view pops back. To keep scanning instead, pass `dismissesOnScan: false`, and it reports each code as it comes into view; a code that stays in view is reported once.
+
+```swift
+// Scan a series of codes on one screen
+QRScannerView(dismissesOnScan: false) { code in scannedCodes.append(code) }
+```
 
 It is as flexible as any SwiftUI view, from a small box to the whole screen:
 
@@ -109,6 +114,36 @@ QRScannerView { code in scannedCode = code }
 Without a frame it covers the screen: it takes all the space it is offered, and the screen's size along an axis left open, such as a `ScrollView`'s or `List`'s height. The camera image fills the view and is cropped to its shape, and only codes visible inside the view are reported.
 
 `QRScannerView` only scans: show it when `CameraAccess.status` is `.authorized`.
+
+### Torch
+
+Set `isTorchOn` to light the scene in the dark. Offer the toggle only where `CameraAccess.hasTorch` is true:
+
+```swift
+@State var isTorchOn = false
+
+QRScannerView(isTorchOn: isTorchOn) { code in scannedCode = code }
+    .overlay(alignment: .bottomTrailing) {
+        if CameraAccess.hasTorch {
+            Toggle("Torch", systemImage: "flashlight.on.fill", isOn: $isTorchOn)
+                .toggleStyle(.button)
+                .padding()
+        }
+    }
+```
+
+### Scanning Once
+
+To scan a single code, present the scanner. It closes itself on the first code, the same on iOS and Android:
+
+```swift
+.sheet(isPresented: $isScanning) {
+    QRScannerView { code in scannedCode = code }
+        .ignoresSafeArea()
+}
+```
+
+Request camera access before presenting it, as described below.
 
 ### Camera Access
 
@@ -143,12 +178,12 @@ struct ScanScreen: View {
 | Status | Meaning | Next step |
 |---|---|---|
 | `.authorized` | Access granted and the device can scan | Show `QRScannerView` |
-| `.notDetermined` | The system can still ask | `CameraAccess.request()` |
+| `.notDetermined` | Access isn't granted, and the system may still ask | `CameraAccess.request()` |
 | `.denied` | The user turned access off | `CameraAccess.openSettings()` |
 | `.restricted` | Blocked by device policy, such as parental controls | Explain; the user can't change it |
 | `.unsupported` | No usable camera, or the iOS Simulator | Hide scanning |
 
-On Android, a first denial still lets the app ask once more, so `status` stays `.notDetermined` until the user denies again.
+Every check reads the system's current state, with nothing cached, so changes made in Settings are always seen. On Android, the system reports a refusal only to the request that got it, so `status` reports `.notDetermined` until `request()` finds out. `request()` asks from an invisible activity, and in `onRequestPermissionsResult` checks whether Android will show the prompt again; after the user refuses twice it returns `.denied`, and `status` reports `.denied` from then on while the app runs. That can't go stale: Android restarts the app when access is revoked in Settings, and a grant there is read directly. Calls made while the prompt is showing share it. Calling `request()` when the scanner appears, as above, takes the user straight to the right step.
 
 ## API Reference
 
@@ -184,11 +219,13 @@ How much of the code can be damaged and still be read: `.low` (7%), `.medium` (1
 
 ```swift
 public struct QRScannerView: View {
-    public init(onScan: @escaping (String) -> Void)
+    public init(isTorchOn: Bool = false, dismissesOnScan: Bool = true, onScan: @escaping (String) -> Void)
 }
 ```
 
-- `onScan`: Called on the main thread with each QR code's text as it comes into view
+- `isTorchOn`: Whether the back camera's torch is on, where `CameraAccess.hasTorch` is true
+- `dismissesOnScan`: Whether to dismiss the scanner's screen after reporting the first code; when `false`, it keeps scanning
+- `onScan`: Called on the main thread with the QR code's text, before the screen is dismissed
 
 ### `CameraAccess`
 
@@ -197,12 +234,14 @@ Main-actor camera permission checks for `QRScannerView`.
 ```swift
 public struct CameraAccess {
     public static var status: CameraStatus { get }
+    public static var hasTorch: Bool { get }
     public static func request() async -> CameraStatus
     public static func openSettings() async -> Bool
 }
 ```
 
 - `status`: The current status, without asking the user
+- `hasTorch`: Whether the back camera has a torch for `QRScannerView(isTorchOn:)`
 - `request()`: Asks the user only while the status is `.notDetermined`, then returns the new status
 - `openSettings()`: Opens the app's page in Settings (iOS) or App info (Android)
 
@@ -218,7 +257,8 @@ SkipQRCode is a transpiled Skip package with bridging, so it works in both Skip 
 |---|---|---|
 | Generation | Core Image `CIQRCodeGenerator` → SwiftUI `Image` | [ZXing](https://github.com/zxing/zxing) → `Bitmap` → Compose `Image` |
 | Scanning | VisionKit `DataScannerViewController` | CameraX preview + ML Kit barcode scanning (`QRScanner.kt`) |
-| Camera access | `AVCaptureDevice` authorization status | Runtime `CAMERA` permission |
+| Torch | `AVCaptureDevice.torchMode` | `CameraController.enableTorch` |
+| Camera access | `AVCaptureDevice` authorization status | `CameraPermissionActivity` with `onRequestPermissionsResult` |
 
 ## Requirements
 
@@ -245,7 +285,7 @@ swift test
 **The scanner stays black**
 - Check that `CameraAccess.status` is `.authorized` before showing `QRScannerView`
 - On iOS, check that `NSCameraUsageDescription` is in your `Info.plist`
-- On Android, check Logcat for errors tagged `QRScanner`
+- On Android, check Logcat for errors tagged `QRScanner` or `CameraPermissionActivity`
 
 **Codes aren't detected**
 - `QRScannerView` reads QR codes only, not other barcode types
