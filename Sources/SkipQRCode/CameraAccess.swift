@@ -5,8 +5,9 @@ import Foundation
 import SwiftUI
 import android.Manifest
 import android.content.pm.PackageManager
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 #elseif os(iOS)
 import AVFoundation
 import UIKit
@@ -17,7 +18,7 @@ import VisionKit
 public enum CameraStatus: Sendable {
     /// Access is granted and the device can scan: show `QRScannerView`.
     case authorized
-    /// The system can still ask the user: call `CameraAccess.request()`.
+    /// Access isn't granted, and the system may still ask the user: call `CameraAccess.request()`.
     case notDetermined
     /// The user turned access off, and only Settings can turn it back on: call `CameraAccess.openSettings()`.
     case denied
@@ -29,14 +30,17 @@ public enum CameraStatus: Sendable {
 
 /// Camera permission checks for `QRScannerView`.
 ///
-/// Check `status` before showing the scanner, `request()` access while the system can still ask,
-/// and `openSettings()` once the user has turned access off. Check `status` again when the app
-/// becomes active, since the user may have changed it in Settings.
+/// Check `status` before showing the scanner, `request()` access while it is `.notDetermined`,
+/// and `openSettings()` once access is `.denied`. Check `status` again when the app becomes
+/// active, since the user may have changed access in Settings.
+///
+/// Every check reads the system's current state, so changes made in Settings are always seen.
+/// On Android, the system reports a refusal only to the request that got it, so `status` reports
+/// `.notDetermined` until `request()` finds out, and `.denied` from then on while the app runs.
+/// That can't go stale: Android restarts the app when access is revoked in Settings, and a grant
+/// there is read directly.
 @MainActor
 public struct CameraAccess {
-    /// Set once the user denies the Android permission, which Android can't report until it is asked.
-    private static let deniedKey = "SkipQRCodeCameraDenied"
-
     /// The current camera status, without asking the user.
     public static var status: CameraStatus {
         #if SKIP
@@ -45,38 +49,54 @@ public struct CameraAccess {
         if ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED {
             return .authorized
         }
-        guard UserDefaults.standard.bool(forKey: deniedKey) else { return .notDetermined }
-        // After one denial Android asks once more, and reports that with the rationale flag
-        if let activity = UIApplication.shared.androidActivity, ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.CAMERA) {
-            return .notDetermined
-        }
-        return .denied
+        // Android reports a refusal only to the request that got it
+        return CameraPermissionActivity.lastResult == CameraStatus.denied ? .denied : .notDetermined
         #elseif os(iOS)
         guard DataScannerViewController.isSupported else { return .unsupported }
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized: return .authorized
-        case .notDetermined: return .notDetermined
-        case .restricted: return .restricted
-        default: return .denied
+        return switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized: .authorized
+        case .notDetermined: .notDetermined
+        case .restricted: .restricted
+        default: .denied
         }
         #else
         return .unsupported
         #endif
     }
 
-    /// Asks the user for camera access when the system can still ask, and returns the resulting status.
+    /// Whether the back camera has a torch that `QRScannerView` can turn on.
+    public static var hasTorch: Bool {
+        #if SKIP
+        return ProcessInfo.processInfo.androidContext.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_FLASH)
+        #elseif os(iOS)
+        return AVCaptureDevice.scannerCamera?.hasTorch ?? false
+        #else
+        return false
+        #endif
+    }
+
+    /// Asks the user for camera access while the system can still ask, and returns the resulting status.
     ///
-    /// Returns the current status at once, without asking, when it is anything but `notDetermined`.
+    /// Returns the current status at once, without asking, when it is anything but `.notDetermined`.
+    /// Calls made while the prompt is showing wait for its answer rather than asking again.
     @discardableResult
     public static func request() async -> CameraStatus {
-        guard status == .notDetermined else { return status }
+        let current = status
+        guard current == .notDetermined else { return current }
         #if SKIP
-        let isGranted = await UIApplication.shared.requestPermission(Manifest.permission.CAMERA)
-        UserDefaults.standard.set(!isGranted, forKey: deniedKey)
+        // CameraPermissionActivity asks, then reads whether Android will ask again
+        let context = UIApplication.shared.androidActivity ?? ProcessInfo.processInfo.androidContext
+        return suspendCoroutine { continuation in
+            CameraPermissionActivity.request(context) { result in
+                continuation.resume(result)
+            }
+        }
         #elseif os(iOS)
         _ = await AVCaptureDevice.requestAccess(for: .video)
-        #endif
         return status
+        #else
+        return current
+        #endif
     }
 
     /// Opens this app's page in Settings, where the user can turn camera access back on.
