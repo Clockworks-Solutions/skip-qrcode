@@ -133,19 +133,19 @@ extension QRCorrection {
     #if SKIP
     var level: ErrorCorrectionLevel {
         switch self {
-        case .low: return ErrorCorrectionLevel.L
-        case .medium: return ErrorCorrectionLevel.M
-        case .quartile: return ErrorCorrectionLevel.Q
-        case .high: return ErrorCorrectionLevel.H
+        	case .low: return ErrorCorrectionLevel.L
+        	case .medium: return ErrorCorrectionLevel.M
+        	case .quartile: return ErrorCorrectionLevel.Q
+        	case .high: return ErrorCorrectionLevel.H
         }
     }
     #else
     var level: String {
         switch self {
-        case .low: "L"
-        case .medium: "M"
-        case .quartile: "Q"
-        case .high: "H"
+        	case .low: "L"
+        	case .medium: "M"
+        	case .quartile: "Q"
+        	case .high: "H"
         }
     }
     #endif
