@@ -54,10 +54,10 @@ public struct CameraAccess {
         #elseif os(iOS)
         guard DataScannerViewController.isSupported else { return .unsupported }
         return switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized: .authorized
-        case .notDetermined: .notDetermined
-        case .restricted: .restricted
-        default: .denied
+        	case .authorized: .authorized
+        	case .notDetermined: .notDetermined
+        	case .restricted: .restricted
+        	default: .denied
         }
         #else
         return .unsupported
